@@ -1,0 +1,10 @@
+#Python Virtual Environment
+.task_venv
+#Input images
+*.png
+#Input data file
+*.npy
+#Test files
+test*.py
+#Pycache folder
+__pycache__
