@@ -1,5 +1,7 @@
 import numpy as np
-from scipy.ndimage import maximum_filter
+import matplotlib.pyplot as plt
+import cv2
+from scipy.ndimage import maximum_filter, gaussian_filter
 
 # Set up global cache variables
 _cached_image_id = None
@@ -65,7 +67,8 @@ def myLocalDescriptorUpgrade(I: np.ndarray, p: tuple, rhom: float,
     p_array = np.flip(np.array(p)) # To transform from row,col to x,y
 
     # Out of Bounds check
-    if (p_array > [M, K] or p_array < rhoM).any():
+    empty = (p_array > [K, M]).any or (p_array < rhoM).any
+    if empty:
         return np.empty(0)
     
     #rho = [i for i in range(rhom, rhoM, rhostep)]
@@ -174,18 +177,26 @@ def isCorner(I: np.ndarray, p: tuple, k: float, Rthres: float) -> bool:
         
         # Fast Vectorized Math for the entire image (Runs exactly once)
         Iy, Ix = np.gradient(I)
-        Ixx_pad = np.pad(Ix ** 2, 1, mode='constant')
-        Iyy_pad = np.pad(Iy ** 2, 1, mode='constant')
-        Ixy_pad = np.pad(Ix * Iy, 1, mode='constant')
+        #Ixx_pad = np.pad(Ix ** 2, 1, mode='constant')
+        #Iyy_pad = np.pad(Iy ** 2, 1, mode='constant')
+        #Ixy_pad = np.pad(Ix * Iy, 1, mode='constant')
         
-        Sxx = sum(Ixx_pad[dy : dy + I.shape[0], dx : dx + I.shape[1]] for dy in range(3) for dx in range(3))
-        Syy = sum(Iyy_pad[dy : dy + I.shape[0], dx : dx + I.shape[1]] for dy in range(3) for dx in range(3))
-        Sxy = sum(Ixy_pad[dy : dy + I.shape[0], dx : dx + I.shape[1]] for dy in range(3) for dx in range(3))
+        Ixx = Ix ** 2
+        Iyy = Iy ** 2
+        Ixy = Ix * Iy
+
+        #Sxx = sum(Ixx_pad[dy : dy + I.shape[0], dx : dx + I.shape[1]] for dy in range(3) for dx in range(3))
+        #Syy = sum(Iyy_pad[dy : dy + I.shape[0], dx : dx + I.shape[1]] for dy in range(3) for dx in range(3))
+        #Sxy = sum(Ixy_pad[dy : dy + I.shape[0], dx : dx + I.shape[1]] for dy in range(3) for dx in range(3))
         
+        Sxx = gaussian_filter(Ixx, sigma=1.0)
+        Syy = gaussian_filter(Iyy, sigma=1.0)
+        Sxy = gaussian_filter(Ixy, sigma=1.0)
+
         # Save the fully computed R matrix to the global cache
         _cached_R_matrix = (Sxx * Syy) - (Sxy ** 2) - k * ((Sxx + Syy) ** 2)
         # This creates a map where every pixel is replaced by the maximum value in its 3x3 neighborhood
-        _cached_local_max_R = maximum_filter(_cached_R_matrix, size=45)
+        _cached_local_max_R = maximum_filter(_cached_R_matrix, size=50)
     # 2. THE LOOKUP
     row, col = p[0], p[1]
     r_val = _cached_R_matrix[row, col]
@@ -201,8 +212,8 @@ def myDetectHarrisFeatures(I: np.ndarray) -> np.ndarray:
     K, N = I.shape
     
     # Define parameters 
-    k = 0.24977
-    Rthres = 2.5
+    k = 0.24968
+    Rthres = 1.2
     
     # Loop over the pixels
     # We skip the outermost 1-pixel border to ensure the 3x3 window 
@@ -287,3 +298,156 @@ def computeDepthMap(I_left: np.ndarray, I_right: np.ndarray,f: float,
             
     print("Processing complete.")
     return disparity_map, depth_map
+
+
+
+def compareDetectors(I: np.ndarray) -> None:
+    print("--- Checking myHarrisDetectFeatures ---")
+    # Detect corners
+    corners = cv2.cornerHarris(I, blockSize=2, ksize=3, k=0.04)
+    # Normalize
+    corners = cv2.normalize(corners, None)
+    ret, corners = cv2.threshold(corners, 0.01, 1, cv2.THRESH_BINARY)
+    # Get corner coordinates
+    corner_coords = np.where(corners > 0)
+
+    corner_coords = (np.array([corner_coords[0], corner_coords[1]])).T
+
+    print(f"OpenCV Harris: {corner_coords}, length: {corner_coords.shape}")
+
+    cv_coords = corner_coords
+
+    custom_coords = myDetectHarrisFeatures(I)
+
+    print(f"myDetectHarrisFeatures: {custom_coords}, length: {custom_coords.shape}")
+    plt.figure(figsize=(14, 7))
+
+    # --- Plot 1: Harris Detector ---
+    plt.subplot(1, 2, 1)
+    plt.imshow(I, cmap='gray')
+        # Note: matplotlib scatter uses (x, y), so we pass column (index 1) then row (index 0)
+    if len(custom_coords) > 0:
+        plt.scatter(custom_coords[:, 1], custom_coords[:, 0], 
+                    c='red', s=20, marker='x', label='Custom')
+    plt.title(f"My Detector ({len(custom_coords)} points)")
+    plt.legend()
+    plt.axis('off')
+
+        # --- Plot 2: OpenCV Detector ---
+    plt.subplot(1, 2, 2)
+    plt.imshow(I, cmap='gray')
+    if len(cv_coords) > 0:
+        plt.scatter(cv_coords[:, 1], cv_coords[:, 0], 
+                    c='cyan', s=20, marker='+', label='OpenCV')
+    plt.title(f"OpenCV ({len(cv_coords)} points)")
+    plt.legend()
+    plt.axis('off')
+
+    # Display the visualization
+    plt.tight_layout()
+    plt.show()
+
+def verifyResults(data: np.ndarray, shape: tuple, I_left: np.ndarray, I_right: np.ndarray,
+                    use_upgrade: bool, D: float, f: float, doffs: float) -> np.ndarray:
+    print("--- Running Sanity Check on Known Points ---")
+
+    # [x_Left, y_Left, x_right, y_right, d_est, d_gt]
+
+    K, M = shape
+    rhom = 5
+    rhoM = 20
+    rhostep = 1
+    N = 8
+
+    depth_map = np.zeros([K, M])
+
+    corners_left = np.zeros([data.shape[0], 2]) # As many corners
+    corners_right = np.zeros_like(corners_left)
+
+    # Exctract Corners
+    for i, row in enumerate(data):
+        p_L = (row[0], row[1])
+        p_R = (row[2], row[3])
+        d_est = row[4]
+        d_gt = row[5]
+        corners_left[i] = [row[1], row[0]] # Inputs is xy, we want ij
+        corners_right[i] = [row[3], row[2]]
+        # Calculate our values
+        calc_d = computeDisparity(p_L, p_R)
+        calc_z = computeDepth(calc_d, f, D, doffs)
+            
+        # Compare
+        #print(f"Points x: {p_L[0], p_R[0]}:")
+        print(f"  Disparity -> Calculated: {calc_d:.3f} | Estimated from Algorithm: {d_est:.3f} | Ground Truth: {d_gt:.3f}")
+        print("-" * 30)
+        depth_map[int(row[1]), int(row[0])] = calc_z
+    
+    # Now we have to see if we can match them as well from our descriptors
+    if use_upgrade:
+        desc_left  = [myLocalDescriptorUpgrade(I_left, tuple(corner), rhom, rhoM, rhostep, N) for corner in corners_left]
+        desc_right = [myLocalDescriptorUpgrade(I_right, tuple(corner), rhom, rhoM, rhostep, N) for corner in corners_right] 
+    else:
+        desc_left  = [myLocalDescriptor(I_left, tuple(corner), rhom, rhoM, rhostep, N) for corner in corners_left]
+        desc_right = [myLocalDescriptor(I_right, tuple(corner), rhom, rhoM, rhostep, N) for corner in corners_right]
+
+    # Matrices to store matched points
+    matched_corners_left = []
+    matched_corners_right = []
+
+
+    for i, p_left in enumerate(corners_left):
+        current_desc_left = desc_left[i]
+
+        best_match_idx = -1
+        min_distance = float('inf')
+
+        # Try to match to one on the right
+        for j, p_right in enumerate(corners_right):
+
+            # Since we know the images are shifted only in one direction, corners are on the same row
+            if p_left[0] == p_right[0]:
+
+                distance = np.linalg.norm(current_desc_left - desc_right[j])
+
+                if distance < min_distance:
+                    min_distance = distance
+                    best_match_idx = j  
+
+        if best_match_idx != -1:
+            matched_corners_right.append(corners_right[best_match_idx])
+            matched_corners_left.append(corners_left[i])
+    
+    matched_corners_right = np.array(matched_corners_right)
+    print(matched_corners_right)
+    matched_corners_left = np.array(matched_corners_left)
+    print(matched_corners_right)
+
+    print(matched_corners_left.shape)
+    print(matched_corners_right.shape)
+
+        # --- Plot 1: Harris Detector ---
+    plt.subplot(1, 2, 1)
+    plt.imshow(I_left, cmap='gray')
+        # Note: matplotlib scatter uses (x, y), so we pass column (index 1) then row (index 0)
+    if len(matched_corners_left) > 0:
+        plt.scatter(matched_corners_left[:, 1], matched_corners_left[:, 0], 
+                    c='red', s=20, marker='x', label='Corners Detected Left')
+    plt.title(f"Corners Detected Left ({len(matched_corners_left)} points)")
+    plt.legend()
+    plt.axis('off')
+
+        # --- Plot 2: OpenCV Detector ---
+    plt.subplot(1, 2, 2)
+    plt.imshow(I_right, cmap='gray')
+    if len(matched_corners_right) > 0:
+        plt.scatter(matched_corners_right[:, 1], matched_corners_right[:, 0], 
+                    c='cyan', s=20, marker='+', label='Corners Detected Right')
+    plt.title(f"Corners Detected Right ({len(matched_corners_right)} points)")
+    plt.legend()
+    plt.axis('off')
+
+    # Display the visualization
+    plt.tight_layout()
+    plt.show()
+
+    return np.array(depth_map)
